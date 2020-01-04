@@ -1,0 +1,163 @@
+---
+title: "add DESeq2 to mass spec data"
+author: "Karen Chu"
+date: "12/19/2019"
+output: html_document
+---
+
+LSC MSI2 KO DESeq2 data append to LSC mass spec data.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Libraries.
+
+```{r libraries}
+library(openxlsx)
+library(DESeq2)
+library(dplyr)
+library(tidyr)
+```
+
+Set work dir
+
+```{r workdir}
+folder <- "~/mount/chuk/LSC_LSK_mass_spec/"
+output.folder <- "~/mount/chuk/LSC_LSK_mass_spec/output/"
+plots.folder <- "~/mount/chuk/LSC_LSK_mass_spec/figures/"
+```
+
+Import mass spec data.
+
+```{r data}
+setwd(output.folder)
+
+lsc.intensity <- readRDS("lsc.intensity_significance.rds")
+lsc.normal.intensity <- readRDS("lsc.normal.intensity_significance.rds")
+lsc.lfq <- readRDS("lsc.lfq_significance.rds")
+
+# Add gene name column
+lsc.intensity$gene.symbol <- gsub( "\\...*", "", rownames(lsc.intensity) )
+lsc.normal.intensity$gene.symbol <- gsub( "\\...*", "", rownames(lsc.normal.intensity) )
+lsc.lfq$gene.symbol <- gsub( "\\...*", "", rownames(lsc.lfq) )
+```
+
+For rows with multiple gene names, separate gene names and duplicate row data for them.
+
+Old method for separating multiple gene rows:
+s <- strsplit(lsc.intensity.multiple.gene.row$gene.symbol, split = ";")
+s1 <- data.frame(V1 = rep(lsc.intensity.multiple.gene.row$gene.symbol, sapply(s, length)), 
+                 V2 = unlist(s))
+
+```{r multiple gene names rows}
+split.multiple.gene.rows <- function(df) {
+  
+  # Identify rows with multiple genes
+  multiple.gene.row.index <- which(grepl(";", df$gene.symbol))
+  df.multiple.gene.row <- df[ multiple.gene.row.index, ]
+  df.remove.multiple.gene.row <- df[ -multiple.gene.row.index, ]
+
+  # Split multiple genes into their own rows and duplicate data.
+  split.multiple.genes <- df.multiple.gene.row %>% separate_rows(gene.symbol)
+
+  # Re-bind multiple gene rows back to original data.
+  final.data <- rbind(df.remove.multiple.gene.row, split.multiple.genes)
+  
+  return(final.data)
+  
+}
+
+lsc.intensity <- split.multiple.gene.rows(lsc.intensity)
+lsc.normal.intensity <- split.multiple.gene.rows(lsc.normal.intensity)
+lsc.lfq <- split.multiple.gene.rows(lsc.lfq)
+```
+
+Import rna-seq MSI2 KO LSC data.
+
+```{r import hypertribe}
+setwd("~/mount/chuk/data_resources/")
+
+msi2.ko.lsc <- read.xlsx("RNA-seq_HSC_LSC_GMP_MSI2_021214.xlsx", sheet = 2)
+```
+
+Import rna-seq and hypertribe data.
+
+```{r import hypertribe}
+setwd("~/mount/chuk/data_resources/")
+
+lsc.hypertribe <- read.xlsx("mouse_lsc_snp_counts_dedupped_significant.xlsx")
+
+lsc.hypertribe.subset <- lsc.hypertribe %>% select(c("chr", "pos", "strand", 
+                                                     "gene.symbol", "diff.frequency", "ADA.frequency",
+                                                     "DCD.frequency", "MIG.frequency", "gene.num.edits",
+                                                     "ADA.fpkm", "DCD.fpkm", "MIG.fpkm"))
+```
+
+Change DESeq2 column names to get Gene column as "gene.symbol"
+
+```{r gene.symbol}
+colnames(msi2.ko.lsc)[1] <- "gene.symbol"
+```
+
+Merge DESeq2 data with mass spec data.
+
+```{r merge}
+# Merge data
+msi2.ko.lsc.subset <- msi2.ko.lsc [ msi2.ko.lsc$gene.symbol %in% unique(lsc.intensity$gene.symbol), ]
+lsc.intensity.deseq <- merge(lsc.intensity, msi2.ko.lsc.subset, by="gene.symbol", all=TRUE)
+
+msi2.ko.lsc.subset <- msi2.ko.lsc [ msi2.ko.lsc$gene.symbol %in% unique(lsc.normal.intensity$gene.symbol), ]
+lsc.normal.intensity.deseq <- merge(lsc.normal.intensity, msi2.ko.lsc.subset, by="gene.symbol", all=TRUE)
+
+msi2.ko.lsc.subset <- msi2.ko.lsc [ msi2.ko.lsc$gene.symbol %in% unique(lsc.lfq$gene.symbol), ]
+lsc.lfq.deseq <- merge(lsc.lfq, msi2.ko.lsc.subset, by="gene.symbol", all=TRUE)
+
+# Rename column names
+colnames(lsc.intensity.deseq)[18:25] <- paste("DESeq2", colnames(lsc.intensity.deseq[18:25]), sep=".")
+colnames(lsc.normal.intensity.deseq)[18:25] <- paste("DESeq2", colnames(lsc.normal.intensity.deseq[18:25]), sep=".")
+colnames(lsc.lfq.deseq)[18:25] <- paste("DESeq2", colnames(lsc.lfq.deseq[18:25]), sep=".")
+```
+
+Merge with hypertribe data.
+
+```{r append rnaseq}
+append.hypertribe.data <- function(df.mass.spec, df.hypertribe) {
+  
+  # Subset only genes that appear in mass spec
+  # If gene in mass spec but not in hypertribe, then it will get NA for hypertribe data
+  shared.genes <- intersect(as.character(df.mass.spec$gene.symbol), 
+                            as.character(df.hypertribe$gene.symbol))
+  df.hypertribe.subset <- df.hypertribe [ df.hypertribe$gene.symbol %in% shared.genes, ]
+  
+  df.final <- merge( df.mass.spec, df.hypertribe.subset, by="gene.symbol", all=TRUE )
+  
+  return(df.final)
+  
+}
+
+lsc.intensity.deseq.hypertribe <- append.hypertribe.data(lsc.intensity.deseq, lsc.hypertribe.subset)
+lsc.normal.intensity.deseq.hypertribe <- append.hypertribe.data(lsc.normal.intensity.deseq, lsc.hypertribe.subset)
+lsc.lfq.deseq.hypertribe <- append.hypertribe.data(lsc.lfq.deseq, lsc.hypertribe.subset)
+```
+
+Write output files.
+
+```{r write}
+setwd(output.folder)
+
+# Write
+write.csv(lsc.intensity.deseq.hypertribe, "lsc.intensity_with.LSC.msi2.ko.deseq2.and.hypertribe.data.csv", row.names = FALSE)
+write.csv(lsc.normal.intensity.deseq.hypertribe, "lsc.normal.intensity_with.LSC.msi2.ko.deseq2.and.hypertribe.data.csv", row.names = FALSE)
+write.csv(lsc.lfq.deseq.hypertribe, "lsc.lfq_with.LSC.msi2.ko.deseq2.and.hypertribe.data.csv", row.names = FALSE)
+```
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,126 @@
+---
+title: "Add RNA-seq and HyperTRIBE data to mass spec"
+author: "Karen Chu"
+date: "12/18/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Libraries.
+
+```{r libraries}
+library(openxlsx)
+library(DESeq2)
+library(dplyr)
+```
+
+Set work dir
+
+```{r workdir}
+folder <- "~/mount/chuk/LSC_LSK_mass_spec/"
+output.folder <- "~/mount/chuk/LSC_LSK_mass_spec/output/"
+plots.folder <- "~/mount/chuk/LSC_LSK_mass_spec/figures/"
+```
+
+Import mass spec data.
+
+```{r data}
+setwd(output.folder)
+
+lsc.intensity <- readRDS("lsc.intensity_significance.rds")
+lsc.normal.intensity <- readRDS("lsc.normal.intensity_significance.rds")
+lsc.lfq <- readRDS("lsc.lfq_significance.rds")
+
+lsk.intensity <- readRDS("lsk.intensity_significance.rds")
+lsk.normal.intensity <- readRDS("lsk.normal.intensity_significance.rds")
+lsk.lfq <- readRDS("lsk.lfq_significance.rds")
+
+# Add gene name column
+lsc.intensity$gene.symbol <- gsub( "\\...*", "", rownames(lsc.intensity) )
+lsc.normal.intensity$gene.symbol <- gsub( "\\...*", "", rownames(lsc.normal.intensity) )
+lsc.lfq$gene.symbol <- gsub( "\\...*", "", rownames(lsc.lfq) )
+
+lsk.intensity$gene.symbol <- gsub( "\\...*", "", rownames(lsk.intensity) )
+lsk.normal.intensity$gene.symbol <- gsub( "\\...*", "", rownames(lsk.normal.intensity) )
+lsk.lfq$gene.symbol <- gsub( "\\...*", "", rownames(lsk.lfq) )
+```
+
+Import rna-seq and hypertribe data.
+
+```{r import hypertribe}
+setwd("~/mount/chuk/data_resources/")
+
+lsc.rna <- readRDS("LSC_rnaseq_read_count_entrez_id.rds")
+lsk.rna <- readRDS("LSK_rnaseq_read_count_entrez_id.rds")
+
+lsc.hypertribe <- read.xlsx("mouse_lsc_snp_counts_dedupped_significant.xlsx")
+lsk.hypertribe <- read.xlsx("mouse_lsk_snp_counts_dedupped_significant.xlsx")
+```
+
+
+Obtain fpkm, edit freq and number of targets per gene.
+
+```{r hypertribe edit freq}
+lsc.hypertribe.subset <- lsc.hypertribe %>% select(c("chr", "pos", "strand", 
+                                                     "gene.symbol", "diff.frequency", "ADA.frequency",
+                                                     "DCD.frequency", "MIG.frequency", "gene.num.edits",
+                                                     "ADA.fpkm", "DCD.fpkm", "MIG.fpkm"))
+
+lsk.hypertribe.subset <- lsk.hypertribe %>% select(c("chr", "pos", "strand",
+                                                     "gene.symbol", "diff.frequency", "ADA.frequency",
+                                                     "DCD.frequency", "MIG.frequency", "gene.num.edits",
+                                                     "ADA.fpkm", "DCD.fpkm", "MIG.fpkm"))
+```
+
+Append rna-seq data to mass spec.
+
+```{r append rnaseq}
+append.hypertribe.data <- function(df.mass.spec, df.hypertribe) {
+  
+  # Subset only genes that appear in mass spec
+  # If gene in mass spec but not in hypertribe, then it will get NA for hypertribe data
+  shared.genes <- intersect(as.character(df.mass.spec$gene.symbol), 
+                            as.character(df.hypertribe$gene.symbol))
+  df.hypertribe.subset <- df.hypertribe [ df.hypertribe$gene.symbol %in% shared.genes, ]
+  
+  df.final <- merge( df.mass.spec, df.hypertribe.subset, by="gene.symbol", all=TRUE )
+  
+  return(df.final)
+  
+}
+
+lsc.intensity.hypertribe <- append.hypertribe.data(lsc.intensity, lsc.hypertribe.subset)
+lsc.normal.intensity.hypertribe <- append.hypertribe.data(lsc.normal.intensity, lsc.hypertribe.subset)
+lsc.lfq.hypertribe <- append.hypertribe.data(lsc.lfq, lsc.hypertribe.subset)
+
+lsk.intensity.hypertribe <- append.hypertribe.data(lsk.intensity, lsk.hypertribe.subset)
+lsk.normal.intensity.hypertribe <- append.hypertribe.data(lsk.normal.intensity, lsk.hypertribe.subset)
+lsk.lfq.hypertribe <- append.hypertribe.data(lsk.lfq, lsk.hypertribe.subset)
+```
+
+Write output.
+
+```{r write output}
+setwd(output.folder)
+
+write.csv(lsc.intensity.hypertribe, "lsc.intensity.hypertribe.csv", row.names = FALSE)
+write.csv(lsc.normal.intensity.hypertribe, "lsc.normal.intensity.hypertribe.csv", row.names = FALSE)
+write.csv(lsc.lfq.hypertribe, "lsc.lfq.hypertribe.csv", row.names = FALSE)
+
+write.csv(lsk.intensity.hypertribe, "lsk.intensity.hypertribe.csv", row.names = FALSE)
+write.csv(lsk.normal.intensity.hypertribe, "lsk.normal.intensity.hypertribe.csv", row.names = FALSE)
+write.csv(lsk.lfq.hypertribe, "lsk.lfq.hypertribe.csv", row.names = FALSE)
+```
+
+
+
+
+
+
+
+
+
+

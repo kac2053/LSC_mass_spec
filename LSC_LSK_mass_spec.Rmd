@@ -1,0 +1,482 @@
+---
+title: "LSC LSK mass spec"
+author: "Karen Chu"
+date: "12/13/2019"
+output: html_document
+---
+
+Hypothesis: MSI2 regulates translation of its targets.
+
+Methods: Perform mass spec on proteins present in MSI2 WT vs MSI2 KO.
+
+Change log2fc to +1 to avoid infinity
+Try to decrease the number of tests to improve p-adjusted by putting a threshold on difference between cre pos +tam and cre pos -tam.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Libraries.
+
+```{r libraries}
+library(openxlsx)
+library(ggplot2)
+```
+
+Set work dir
+
+```{r work dir}
+folder <- "~/mount/chuk/LSC_LSK_mass_spec/"
+output.folder <- "~/mount/chuk/LSC_LSK_mass_spec/output/"
+plots.folder <- "~/mount/chuk/LSC_LSK_mass_spec/figures/"
+```
+
+Import data.
+
+```{r data}
+setwd(folder)
+
+lsc <- read.xlsx("data/Msi2KOLSC_MS.xlsx")
+lsk <- read.xlsx("data/Msi2KO_3wks_LSK_MS.xlsx")
+
+# Remove NA (blank gene name entries in xlsx)
+lsc <- lsc [ !(is.na(lsc$Gene.names)), ]
+lsk <- lsk [ !(is.na(lsk$Gene.names)), ]
+
+rownames(lsc) <- paste( lsc$Gene.names, seq(1, nrow(lsc)), sep="..." )
+rownames(lsk) <- paste( lsk$Gene.names, seq(1, nrow(lsk)), sep="..." )
+```
+
+Subset data into the different intensity data (for better organization)
+
+```{r separate}
+# Intensity
+lsc.intensity.index <- grep("^Intensity", colnames(lsc))
+lsk.intensity.index <- grep("^Intensity", colnames(lsk))
+lsc.intensity <- lsc [ ,lsc.intensity.index ]
+lsk.intensity <- lsk [ ,lsk.intensity.index ]
+
+# Normal intensity
+lsc.normal.intensity.index <- grep("^norm_Intensity", colnames(lsc))
+lsk.normal.intensity.index <- grep("^norm_Intensity", colnames(lsk))
+lsc.normal.intensity <- lsc [ ,lsc.normal.intensity.index ]
+lsk.normal.intensity <- lsk [ ,lsk.normal.intensity.index ]
+
+# LFQ
+lsc.lfq.index <- grep("^LFQ", colnames(lsc))
+lsk.lfq.index <- grep("^LFQ", colnames(lsk))
+lsc.lfq <- lsc [ ,lsc.lfq.index ]
+lsk.lfq <- lsk [ ,lsk.lfq.index ]
+```
+
+Calculate mean of all replicates per gene.
+Note: You need to escape special characters twice, once for R and once for the regular expression.
+
+```{r mean}
+# Calculate log2FC
+calculate.log2fc.lsc <- function(df) {
+  
+  df.cre.pos.plus.tam <- df[ ,grep("y_TAM_cre\\+", colnames(df)) ]
+  df.cre.pos.no.tam <- df[ ,grep("noTAM_cre\\+", colnames(df)) ]
+
+  df.cre.neg.plus.tam <- df[ ,grep("y_TAM_cre-", colnames(df)) ]
+  df.cre.neg.no.tam <- df[ ,grep("Intensity_noTAM.*re-", colnames(df)) ]
+  
+  # Calculate mean across replicates
+  df.cre.pos.plus.tam.rowMeans <- rowMeans(df.cre.pos.plus.tam, na.rm=TRUE)
+  df.cre.pos.no.tam.rowMeans <- rowMeans(df.cre.pos.no.tam, na.rm=TRUE)
+  df.cre.neg.plus.tam.rowMeans <- rowMeans(df.cre.neg.plus.tam, na.rm=TRUE)
+  df.cre.neg.no.tam.rowMeans <- rowMeans(df.cre.neg.no.tam, na.rm=TRUE)
+  
+  # Calculate log2FC
+  df.cre.pos.log2fc <- log2( df.cre.pos.plus.tam.rowMeans / df.cre.pos.no.tam.rowMeans )
+  df.cre.neg.log2fc <- log2( df.cre.neg.plus.tam.rowMeans / df.cre.neg.no.tam.rowMeans )
+  
+  res <- data.frame( cre.pos.log2fc = df.cre.pos.log2fc,
+                     cre.neg.log2fc = df.cre.neg.log2fc )
+  
+  return(res)
+  
+}
+
+calculate.log2fc.lsk <- function(df) {
+  
+  df.cre.pos <- df[ ,grep("re\\+", colnames(df)) ]
+  df.cre.neg <- df[ ,grep("re\\-", colnames(df)) ]
+  
+  # Calculate mean across replicates
+  df.cre.pos.rowMeans <- rowMeans(df.cre.pos, na.rm=TRUE)
+  df.cre.neg.rowMeans <- rowMeans(df.cre.neg, na.rm=TRUE)
+  
+  # Calculate log2FC
+  df.log2fc <- log2( df.cre.pos.rowMeans / df.cre.neg.rowMeans )
+
+  res <- data.frame( log2fc = df.log2fc )
+  
+  return(res)
+  
+}
+
+lsc.intensity.log2fc <- calculate.log2fc.lsc(lsc.intensity)
+lsc.normal.intensity.log2fc <- calculate.log2fc.lsc(lsc.normal.intensity)
+lsc.lfq.log2fc <- calculate.log2fc.lsc(lsc.lfq)
+
+lsk.intensity.log2fc <- calculate.log2fc.lsk(lsk.intensity)
+lsk.normal.intensity.log2fc <- calculate.log2fc.lsk(lsk.normal.intensity)
+lsk.lfq.log2fc <- calculate.log2fc.lsk(lsk.lfq)
+```
+
+p-value calculated by taking the raw intensity numbers in +tam vs -tam.
+
+Old code:
+keepers.index <- which( (abs( rowMeans( df[,cre.pos.tam.index] ) - rowMeans( df[,cre.pos.no.tam.index] ) ) > min.value) )
+keepers.index <- which( (abs( rowMeans( df[,cre.neg.tam.index] ) - rowMeans( df[,cre.neg.no.tam.index] ) ) > min.value) )
+
+```{r p-value calculate}
+setwd(output.folder)
+
+# Calculate p-value
+calculate.pvalue.lsc <- function(df) {
+  
+  cre.pos.tam.index <- grep("y_TAM_cre\\+", colnames(df))
+  cre.pos.no.tam.index <- grep("noTAM_cre\\+", colnames(df))
+  
+  cre.neg.tam.index <- grep("y_TAM_cre\\-", colnames(df))
+  cre.neg.no.tam.index <- grep("noTAM.*re\\-", colnames(df))
+
+  cre.pos.pvalue <- sapply(1:nrow(df), function(i) t.test(df[ i, cre.pos.tam.index ], df[ i, cre.pos.no.tam.index])$p.value)
+  cre.neg.pvalue <- sapply(1:nrow(df), function(i) t.test(df[ i, cre.neg.tam.index ], df[ i, cre.neg.no.tam.index])$p.value)
+
+  df.stats <- data.frame( cre.pos.pvalue = cre.pos.pvalue,
+                          cre.neg.pvalue = cre.neg.pvalue )
+  
+  return(df.stats)
+  
+}
+
+calculate.pvalue.lsk <- function(df) {
+  
+  cre.pos.index <- grep("cre\\+", colnames(df))
+  cre.neg.index <- grep("*re\\-", colnames(df))
+
+  pvalue <- sapply(1:nrow(df), function(i) t.test(df[ i, cre.pos.index ], df[ i, cre.neg.index])$p.value)
+
+  df.stats <- data.frame( pvalue = pvalue )
+  
+  return(df.stats)
+  
+}
+
+lsc.intensity.stats <- cbind( lsc.intensity, lsc.intensity.log2fc, calculate.pvalue.lsc(lsc.intensity) )
+lsc.normal.intensity.stats <- cbind( lsc.normal.intensity, lsc.normal.intensity.log2fc, calculate.pvalue.lsc(lsc.normal.intensity) )
+lsc.lfq.stats <- cbind( lsc.lfq, lsc.lfq.log2fc, calculate.pvalue.lsc(lsc.lfq) )
+
+lsk.intensity.stats <- cbind( lsk.intensity, lsk.intensity.log2fc, calculate.pvalue.lsk(lsk.intensity) )
+lsk.normal.intensity.stats <- cbind( lsk.normal.intensity, lsk.normal.intensity.log2fc, calculate.pvalue.lsk(lsk.normal.intensity) )
+lsk.lfq.stats <- cbind( lsk.lfq, lsk.lfq.log2fc, calculate.pvalue.lsk(lsk.lfq) )
+```
+
+Calculate p-adjusted
+
+```{r p.adjust}
+# Calculate p-adjusted
+calculate.padjust.lsc <- function(df) {
+  
+  # Select intensity rows with rowMean >= [set value]
+  cre.pos.tam.index <- grep("y_TAM_cre\\+", colnames(df))
+  cre.pos.no.tam.index <- grep("noTAM_cre\\+", colnames(df))
+  
+  # Obtain index of all proteins that have 2 or more replicates with value of 0
+  # Calculate number of zeros in each row
+  keepers.index.cre.pos.tam <- unlist( sapply(1:nrow(df), function(i) length( which( df[i, cre.pos.tam.index ] == 0 ) ) ) )
+  
+  # Identify which row has less than 2 zeros
+  keepers.index.cre.pos.tam <- which( keepers.index.cre.pos.tam < 2 )
+  
+  # Repeat with no tam samples.
+  keepers.index.cre.pos.no.tam <- unlist( sapply(1:nrow(df), function(i) length( which( df[i, cre.pos.no.tam.index ] == 0 ) ) ) )
+  keepers.index.cre.pos.no.tam <- which( keepers.index.cre.pos.no.tam < 2 )
+  
+  # Get samples that have at least 2 replicates that are not equal to zero in each condition.
+  keepers.index <- intersect( keepers.index.cre.pos.tam, keepers.index.cre.pos.no.tam )
+  
+  # Calculate p-adjusted on specified samples above.
+  df$cre.pos.p.adjust <- NA
+  df$cre.pos.p.adjust[keepers.index] <- p.adjust(df$cre.pos.pvalue[keepers.index], 'BH')
+  
+  # Repeat above method with cre negative samples.
+  cre.neg.tam.index <- grep("y_TAM_cre\\-", colnames(df))
+  cre.neg.no.tam.index <- grep("noTAM.*re\\-", colnames(df))
+  
+  keepers.index.cre.neg.tam <- unlist( sapply(1:nrow(df), function(i) length( which( df[i, cre.neg.tam.index ] == 0 ) ) ) )
+  keepers.index.cre.neg.tam <- which( keepers.index.cre.neg.tam < 2 )
+  keepers.index.cre.neg.no.tam <- unlist( sapply(1:nrow(df), function(i) length( which( df[i, cre.neg.no.tam.index ] == 0 ) ) ) )
+  keepers.index.cre.neg.no.tam <- which( keepers.index.cre.neg.no.tam < 2 )
+  keepers.index <- intersect( keepers.index.cre.neg.tam, keepers.index.cre.neg.no.tam )
+  
+  df$cre.neg.p.adjust <- NA
+  df$cre.neg.p.adjust[keepers.index] <- p.adjust( df$cre.neg.pvalue[keepers.index], 'BH' )
+  
+  return(df)
+  
+}
+
+calculate.padjust.lsk <- function(df) {
+  
+  cre.pos.index <- which( grepl("re\\+", colnames(df)))
+  cre.neg.index <- which( grepl("re\\-", colnames(df)))
+  
+  keepers.index.cre.pos <- unlist( sapply(1:nrow(df), function(i) length( which( df[i, cre.pos.index ] == 0 ) ) ) )
+  keepers.index.cre.pos <- which( keepers.index.cre.pos < 2 )
+  keepers.index.cre.neg <- unlist( sapply(1:nrow(df), function(i) length( which( df[i, cre.neg.index ] == 0 ) ) ) )
+  keepers.index.cre.neg <- which( keepers.index.cre.neg < 2 )
+  keepers.index <- intersect( keepers.index.cre.pos, keepers.index.cre.neg )  
+  
+  df$p.adjust <- NA
+  df$p.adjust[keepers.index] <- p.adjust( df$pvalue[keepers.index], 'BH' )
+  
+  return(df)
+  
+}
+
+lsc.intensity <- calculate.padjust.lsc(lsc.intensity.stats)
+lsc.normal.intensity <- calculate.padjust.lsc(lsc.normal.intensity.stats)
+lsc.lfq <- calculate.padjust.lsc(lsc.lfq.stats)
+
+lsk.intensity <- calculate.padjust.lsk(lsk.intensity.stats)
+lsk.normal.intensity <- calculate.padjust.lsk(lsk.normal.intensity.stats)
+lsk.lfq <- calculate.padjust.lsk(lsk.lfq.stats)
+```
+
+Save output.
+
+```{r write}
+setwd(output.folder)
+
+write.csv(cbind( lsc$Gene.names, lsc.intensity), "lsc.intensity_significance.csv", row.names = FALSE)
+write.csv(cbind( lsc$Gene.names, lsc.normal.intensity), "lsc.normal.intensity_significance.csv", row.names = FALSE)
+write.csv(cbind( lsc$Gene.names, lsc.lfq), "lsc.lfq_significance.csv", row.names = FALSE)
+
+write.csv(cbind( lsk$Gene.names, lsk.intensity), "lsk.intensity_significance.csv", row.names = FALSE)
+write.csv(cbind( lsk$Gene.names, lsk.normal.intensity), "lsk.normal.intensity_significance.csv", row.names = FALSE)
+write.csv(cbind( lsk$Gene.names, lsk.lfq), "lsk.lfq_significance.csv", row.names = FALSE)
+```
+
+```{r rds}
+setwd(output.folder)
+
+saveRDS(lsc.intensity, "lsc.intensity_significance.rds")
+saveRDS(lsc.normal.intensity, "lsc.normal.intensity_significance.rds")
+saveRDS(lsc.lfq, "lsc.lfq_significance.rds")
+
+saveRDS(lsk.intensity, "lsk.intensity_significance.rds")
+saveRDS(lsk.normal.intensity, "lsk.normal.intensity_significance.rds")
+saveRDS(lsk.lfq, "lsk.lfq_significance.rds")
+```
+
+Import mass spec data.
+
+```{r data}
+setwd(output.folder)
+
+lsc.intensity <- readRDS("lsc.intensity_significance.rds")
+lsc.normal.intensity <- readRDS("lsc.normal.intensity_significance.rds")
+lsc.lfq <- readRDS("lsc.lfq_significance.rds")
+
+lsk.intensity <- readRDS("lsk.intensity_significance.rds")
+lsk.normal.intensity <- readRDS("lsk.normal.intensity_significance.rds")
+lsk.lfq <- readRDS("lsk.lfq_significance.rds")
+
+# Add gene name column
+lsc.intensity$gene.symbol <- gsub( "\\...*", "", rownames(lsc.intensity) )
+lsc.normal.intensity$gene.symbol <- gsub( "\\...*", "", rownames(lsc.normal.intensity) )
+lsc.lfq$gene.symbol <- gsub( "\\...*", "", rownames(lsc.lfq) )
+
+lsk.intensity$gene.symbol <- gsub( "\\...*", "", rownames(lsk.intensity) )
+lsk.normal.intensity$gene.symbol <- gsub( "\\...*", "", rownames(lsk.normal.intensity) )
+lsk.lfq$gene.symbol <- gsub( "\\...*", "", rownames(lsk.lfq) )
+```
+
+Histogram log2FC
+
+```{r histogram}
+setwd(plots.folder)
+
+histogram.plot.lsc <- function(df, title) {
+  
+  df.subset <- df [ !(is.na(df$cre.pos.pvalue)), ]
+  df.subset <- df.subset [ !(is.na(df.subset$cre.pos.log2fc)), ]
+  df.subset <- df.subset [ df.subset$cre.pos.log2fc != "Inf", ]
+  df.subset <- df.subset [ df.subset$cre.pos.log2fc != "-Inf", ]
+  p.pos <- ggplot(df.subset, aes(x=cre.pos.log2fc)) + 
+  geom_histogram(color="white", fill="black") +
+  ggtitle(paste0(title, " Cre+ log2FC")) +
+  theme_minimal() +
+  xlim(-10,10) +
+  xlab("\nlog2(TAM/noTAM)") +
+  ylab("Count\n") +
+  theme(plot.title = element_text(size=40)) +
+  theme(axis.text=element_text(size=30, color="black"), axis.title=element_text(size=30, color="black")) +
+  theme(axis.line = element_line(colour = "black", size=1))
+  
+  png(paste0( "Histogram_", title, "_log2FC_cre.pos.png"), 1000, 800)
+  print(p.pos)
+  dev.off()
+  
+  df.subset <- df [ !(is.na(df$cre.neg.pvalue)), ]
+  df.subset <- df.subset [ !(is.na(df.subset$cre.neg.log2fc)), ]
+  df.subset <- df.subset [ df.subset$cre.neg.log2fc != "Inf", ]
+  df.subset <- df.subset [ df.subset$cre.neg.log2fc != "-Inf", ]
+  p.neg <- ggplot(df.subset, aes(x=cre.neg.log2fc)) + 
+  geom_histogram(color="white", fill="black") +
+  ggtitle(paste0(title, " Cre- log2FC")) +
+  theme_minimal() +
+  xlim(-10,10) +
+  xlab("\nlog2(TAM/noTAM)") +
+  ylab("Count\n") +
+  theme(plot.title = element_text(size=40)) +
+  theme(axis.text=element_text(size=30, color="black"), axis.title=element_text(size=30, color="black")) +
+  theme(axis.line = element_line(colour = "black", size=1))
+  
+  png(paste0( "Histogram_", title, "_log2FC_cre.neg.png"), 1000, 800)
+  print(p.neg)
+  dev.off()
+  
+}
+
+histogram.plot.lsk <- function(df, title) {
+  
+  df.subset <- df [ !is.na(df$pvalue), ]
+  df.subset <- df.subset [ !(is.na(df.subset$log2fc)), ]
+  df.subset <- df.subset [ df.subset$log2fc != "Inf", ]
+  df.subset <- df.subset [ df.subset$log2fc != "-Inf", ]
+  p <- ggplot(df.subset, aes(x=log2fc)) + 
+  geom_histogram(color="white", fill="black") +
+  ggtitle(paste0(title, " log2FC")) +
+  theme_minimal() +
+  xlim(-10,10) +
+  xlab("\nlog2(Cre+/Cre-)") +
+  ylab("Count\n") +
+  theme(plot.title = element_text(size=40)) +
+  theme(axis.text=element_text(size=30, color="black"), axis.title=element_text(size=30, color="black")) +
+  theme(axis.line = element_line(colour = "black", size=1))
+  
+  png(paste0( "Histogram_", title, "_log2FC.png"), 1000, 800)
+  print(p)
+  dev.off()
+
+}
+
+histogram.plot.lsc(lsc.intensity, "lsc.intensity")
+histogram.plot.lsc(lsc.normal.intensity, "lsc.normal.intensity")
+histogram.plot.lsc(lsc.lfq, "lsc.lfq")
+
+histogram.plot.lsk(lsk.intensity, "lsk.intensity")
+histogram.plot.lsk(lsk.normal.intensity, "lsk.normal.intensity")
+histogram.plot.lsk(lsk.lfq, "lsk.lfq")
+```
+
+Volcano plots.
+
+```{r volcano plots}
+setwd(plots.folder)
+
+volcano.plot.lsc <- function(df, title, p.value.threshold) {
+  
+  volcano.input <- as.data.frame( df[ order( df$cre.pos.pvalue, decreasing = F ), ] )
+  df.subset <- mutate(volcano.input, sig=ifelse(volcano.input$cre.pos.pvalue < p.value.threshold, "Sig", "Not Sig"))
+  
+  df.subset <- df.subset [ !(is.na(df.subset$cre.pos.pvalue)), ]
+  df.subset <- df.subset [ !(is.na(df.subset$cre.pos.log2fc)), ]
+  df.subset <- df.subset [ df.subset$cre.pos.log2fc != "Inf", ]
+  df.subset <- df.subset [ df.subset$cre.pos.log2fc != "-Inf", ]
+  p.pos <- ggplot(data=df.subset, aes(x=cre.pos.log2fc, y=-log10(cre.pos.pvalue), colour= sig)) + 
+  geom_point(alpha=1, size=4) +
+  theme_minimal() +
+  scale_color_manual( values = c( "Sig"='red3', "Not Sig" ='black' ) ) +
+  theme(legend.position="none") +
+  xlab("\nlog2(TAM/noTAM)") + ylab("-log10(p)\n") +
+  xlim(-10,10) +
+  ggtitle(paste0( title, " Cre+ (red = pvalue < 0.05)" )) +
+  theme(plot.title = element_text(size=40)) +
+  theme(axis.text=element_text(size=30, color="black"), axis.title=element_text(size=30, color="black")) +
+  theme(axis.line = element_line(colour = "black", size=1))
+  
+  png(paste0( title, "_cre.pos.volcano.plot.png"), 1000, 800)
+  print(p.pos)
+  dev.off()
+  
+  volcano.input <- as.data.frame( df[ order( df$cre.neg.pvalue, decreasing = F ), ] )
+  df.subset <- mutate(volcano.input, sig=ifelse(volcano.input$cre.neg.pvalue < p.value.threshold, "Sig", "Not Sig"))
+  
+  df.subset <- df.subset [ !(is.na(df.subset$cre.neg.pvalue)), ]
+  df.subset <- df.subset [ !(is.na(df.subset$cre.neg.log2fc)), ]
+  df.subset <- df.subset [ df.subset$cre.neg.log2fc != "Inf", ]
+  df.subset <- df.subset [ df.subset$cre.neg.log2fc != "-Inf", ]
+  p.neg <- ggplot(data=df.subset, aes(x=cre.neg.log2fc, y=-log10(cre.neg.pvalue), colour= sig)) + 
+  geom_point(alpha=1, size=4) +
+  theme_minimal() +
+  scale_color_manual( values = c( "Sig"='red3', "Not Sig" ='black' ) ) +
+  theme(legend.position="none") +
+  xlab("\nlog2(TAM/noTAM)") + ylab("-log10(p)\n") +
+  xlim(-10,10) +
+  ggtitle(paste0(title, " Cre- (red = pvalue < 0.05)")) +
+  theme(plot.title = element_text(size=40)) +
+  theme(axis.text=element_text(size=30, color="black"), axis.title=element_text(size=30, color="black")) +
+  theme(axis.line = element_line(colour = "black", size=1))
+  
+  png(paste0( title, "_cre.neg.volcano.plot.png"), 1000, 800)
+  print(p.neg)
+  dev.off()
+  
+}
+
+volcano.plot.lsk <- function(df, title, p.value.threshold) {
+  
+  volcano.input <- as.data.frame( df[ order( df$pvalue, decreasing = F ), ] )
+  df.subset <- mutate(volcano.input, sig=ifelse(volcano.input$pvalue < p.value.threshold, "Sig", "Not Sig"))
+  
+  df.subset <- df.subset [ !(is.na(df.subset$pvalue)), ]
+  df.subset <- df.subset [ !(is.na(df.subset$log2fc)), ]
+  df.subset <- df.subset [ df.subset$log2fc != "Inf", ]
+  df.subset <- df.subset [ df.subset$log2fc != "-Inf", ]
+  p <- ggplot(data=df.subset, aes(x=log2fc, y=-log10(pvalue), colour= sig)) + 
+  geom_point(alpha=1, size=4) +
+  theme_minimal() +
+  scale_color_manual( values = c( "Sig"='red3', "Not Sig" ='black' ) ) +
+  theme(legend.position="none") +
+  xlab("\nlog2(Cre+/Cre-)") + ylab("-log10(p)\n") +
+  xlim(-10,10) +
+  ggtitle(paste0(title, "(red = pvalue < 0.05)")) +
+  theme(plot.title = element_text(size=40)) +
+  theme(axis.text=element_text(size=30, color="black"), axis.title=element_text(size=30, color="black")) +
+  theme(axis.line = element_line(colour = "black", size=1))
+  
+  png(paste0( title, "_volcano.plot.png"), 1000, 800)
+  print(p)
+  dev.off()
+  
+}
+
+volcano.plot.lsc(lsc.intensity, "lsc.intensity", 0.05)
+volcano.plot.lsc(lsc.normal.intensity, "lsc.normal.intensity", 0.05)
+volcano.plot.lsc(lsc.lfq, "lsc.lfq", 0.05)
+
+volcano.plot.lsk(lsk.intensity, "lsk.intensity", 0.05)
+volcano.plot.lsk(lsk.normal.intensity, "lsk.normal.intensity", 0.05)
+volcano.plot.lsk(lsk.lfq, "lsk.lfq", 0.05)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
